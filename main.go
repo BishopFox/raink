@@ -97,7 +97,7 @@ func main() {
 		*batchLength = 4096
 	}
 
-	var tokenLimitThreshold = int(0.5 * float64(*batchLength))
+	var tokenLimitThreshold = int(0.95 * float64(*batchLength))
 
 	if *inputFile == "" {
 		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-l <batch_length>] [--ollama-model <model_name>]")
