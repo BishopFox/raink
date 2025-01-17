@@ -25,12 +25,6 @@ import (
 	"github.com/pkoukk/tiktoken-go"
 )
 
-// TODO: Move these attributes to CLI args.
-
-// https://platform.openai.com/docs/models/gp#models-overview
-const maxTokens = 128000
-const tokenLimitThreshold = 0.95 * maxTokens
-
 // https://pkg.go.dev/github.com/openai/openai-go@v0.1.0-alpha.38#ChatModel
 // const model = openai.ChatModelGPT4o2024_08_06
 const model = openai.ChatModelGPT4oMini
@@ -94,12 +88,19 @@ func main() {
 	inputFile := flag.String("f", "", "Input file")
 	batchSize := flag.Int("s", 10, "Batch size")
 	numRuns := flag.Int("r", 10, "Number of runs")
+	batchLength := flag.Int("l", 128000, "Batch length (number of tokens)")
 	initialPrompt := flag.String("p", "", "Initial prompt")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
 	flag.Parse()
 
+	if *ollamaModel != "" && *batchLength == 128000 {
+		*batchLength = 4096
+	}
+
+	var tokenLimitThreshold = int(0.5 * float64(*batchLength))
+
 	if *inputFile == "" {
-		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [--ollama-model <model_name>]")
+		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-l <batch_length>] [--ollama-model <model_name>]")
 		return
 	}
 
@@ -162,7 +163,7 @@ func main() {
 
 		if totalBatches > 0 {
 			averageTokens := totalTokens / totalBatches
-			averagePercentage := float64(averageTokens) / maxTokens * 100
+			averagePercentage := float64(averageTokens) / float64(*batchLength) * 100
 			log.Printf("Average estimated tokens: %d (%.2f%% of max tokens)", averageTokens, averagePercentage)
 		}
 
@@ -177,7 +178,7 @@ func main() {
 	}
 
 	// Recursive processing
-	finalResults := recursiveProcess(objects, currentBatchSize, *numRuns, *initialPrompt, rng, 1, ollamaModel)
+	finalResults := recursiveProcess(objects, *batchSize, *numRuns, *batchLength, *initialPrompt, rng, 1, ollamaModel)
 
 	// Add the rank key to each final result based on its position in the list
 	for i := range finalResults {
@@ -192,7 +193,7 @@ func main() {
 	fmt.Println(string(jsonResults))
 }
 
-func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, depth int, ollamaModel *string) []FinalResult {
+func recursiveProcess(objects []Object, batchSize, numRuns int, batchLength int, initialPrompt string, rng *rand.Rand, depth int, ollamaModel *string) []FinalResult {
 	// If we have only one object, return it with the highest score
 	if len(objects) == 1 {
 		return []FinalResult{
@@ -210,7 +211,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 	}
 
 	// Process the objects and get the sorted results
-	results := processObjects(objects, batchSize, numRuns, initialPrompt, rng, ollamaModel)
+	results := processObjects(objects, batchSize, numRuns, batchLength, initialPrompt, rng, ollamaModel)
 
 	// TODO: Move this ratio (50%) to a CLI arg.
 	mid := len(results) / 2
@@ -227,7 +228,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 		topHalfObjects = append(topHalfObjects, Object{ID: result.Key, Value: result.Value})
 	}
 
-	refinedTopHalf := recursiveProcess(topHalfObjects, batchSize, numRuns, initialPrompt, rng, depth+1, ollamaModel)
+	refinedTopHalf := recursiveProcess(topHalfObjects, batchSize, numRuns, batchLength, initialPrompt, rng, depth+1, ollamaModel)
 
 	// Adjust scores by recursion depth
 	for i := range refinedTopHalf {
@@ -246,7 +247,7 @@ func logRunBatch(runNumber, totalRuns, batchNumber, totalBatches int, message st
 	log.Printf(formattedMessage, args...)
 }
 
-func processObjects(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, ollamaModel *string) []FinalResult {
+func processObjects(objects []Object, batchSize, numRuns int, batchLength int, initialPrompt string, rng *rand.Rand, ollamaModel *string) []FinalResult {
 	scores := make(map[string][]float64)
 
 	totalBatches := len(objects) / batchSize
@@ -296,7 +297,7 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 			go func(runNumber, batchNumber int, group []Object) {
 				// formattedMessage := fmt.Sprintf("Run %*d/%d, Batch %*d/%d: Submitting batch to API\n", len(strconv.Itoa(numRuns)), runNumber, numRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches)
 				// log.Printf(formattedMessage)
-				rankedGroup := rankGroup(group, runNumber, numRuns, batchNumber, totalBatches, initialPrompt, ollamaModel)
+				rankedGroup := rankGroup(group, runNumber, numRuns, batchNumber, totalBatches, batchLength, initialPrompt, ollamaModel)
 				resultsChan <- rankedGroup
 			}(i+1, j+1, group)
 		}
@@ -400,7 +401,7 @@ func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tik
 	return len(encoding.Encode(prompt, nil, nil))
 }
 
-func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string, ollamaModel *string) []RankedObject {
+func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, batchLength int, initialPrompt string, ollamaModel *string) []RankedObject {
 	prompt := initialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
@@ -412,7 +413,7 @@ func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, to
 		inputIDs[obj.ID] = true
 	}
 	if ollamaModel != nil && *ollamaModel != "" {
-		rankedResponse = callOllama(prompt, *ollamaModel, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
+		rankedResponse = callOllama(prompt, *ollamaModel, runNumber, totalRuns, batchNumber, totalBatches, batchLength, inputIDs)
 	} else {
 		rankedResponse = callOpenAI(prompt, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
 	}
@@ -613,7 +614,7 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 	}
 }
 
-func callOllama(prompt string, model string, runNumber int, totalRuns int, batchNumber int, totalBatches int, inputIDs map[string]bool) RankedObjectResponse {
+func callOllama(prompt string, model string, runNumber int, totalRuns int, batchNumber int, totalBatches int, batchLength int, inputIDs map[string]bool) RankedObjectResponse {
 	apiURL := os.Getenv("OLLAMA_API_URL")
 	if apiURL == "" {
 		apiURL = "http://localhost:11434/api/chat"
@@ -632,6 +633,7 @@ func callOllama(prompt string, model string, runNumber int, totalRuns int, batch
 			"model":    model,
 			"stream":   false,
 			"format":   "json",
+			"num_ctx":  batchLength,
 			"messages": conversationHistory,
 		})
 		if err != nil {
